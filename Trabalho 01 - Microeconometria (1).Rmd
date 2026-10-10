@@ -1,0 +1,675 @@
+---
+title: "Variáveis Instrumentais - Reprodução do artigo More Kids, More Conflict? Family Size and Domestic
+Violence in a High‐Fertility Setting (Pritadrajati, 2025)"
+author: "Beatriz de Luna Barreto"
+date: "2026-09-14"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(haven)
+library(dplyr)
+library(modelsummary)
+library(openxlsx)
+library(estimatr)
+```
+
+
+Para investigar o impacto causal do tamanho da família sobre a violência por parceiro íntimo (IPV), o estudo de Pritadrajati (2025) utiliza dados de representatividade nacional da Samoa Demographic and Health Survey–Multiple Indicator Cluster Survey (DHS–MICS) 2019–20. A pesquisa investigou 3.675 domicílios distribuídos pelas quatro principais regiões do país (Apia Urban Area, North-West Upolu, Rest of Upolu e Savai'i), configurando uma base de dados detalhada para o contexto de Samoa. O questionário possui uma estrutura abrangente, incorporando módulos sobre composição familiar, histórico de nascimentos, empoderamento feminino e violência doméstica. Este último foi aplicado individualmente a uma mulher selecionada aleatoriamente por domicílio, capturando episódios de violência emocional, física e sexual. Para viabilizar a estratégia de identificação causal via variáveis instrumentais, o recorte analítico restringe-se a mulheres de 18 a 49 anos, atualmente casadas ou em união consensual, com pelo menos dois filhos dependentes residentes no domicílio.
+
+
+```{r}
+# --- 1. Leitura das Bases ---
+
+# Mulheres (data_wm) 
+data_wm <- read_sav("MICS6 Samoa SPSS Datasets/wm.sav")
+
+# Histórico de Nascimentos (data_bh)
+data_bh <- read_sav("MICS6 Samoa SPSS Datasets/bh.sav")
+
+# Domicílios (data_hh)
+data_hh <- read_sav("MICS6 Samoa SPSS Datasets/hh.sav")
+```
+
+```{r}
+# --- 2. Criar Identificadores e Fazer o Merge das Bases ---
+data_wm <- data_wm %>%
+  mutate(
+    id_pess = paste0(HH1, HH2, LN),
+    id_dom  = paste0(HH1, HH2)
+  )
+
+data_bh <- data_bh %>%
+  mutate(
+    id_pess  = paste0(HH1, HH2, LN),
+    id_dom   = paste0(HH1, HH2),
+    id_birth = paste0(HH1, HH2, LN, BHLN)
+  )
+
+data_hh <- data_hh %>%
+  mutate(
+    id_dom = paste0(HH1, HH2)
+  )
+
+# merge m:m id_pess usando data_bh / merge m:m id_dom usando data_hh
+mw_analysis <- data_wm %>%
+  full_join(data_bh, by = "id_pess", suffix = c("", ".bh_dup")) %>%
+  full_join(data_hh, by = "id_dom", suffix = c("", ".hh_dup"))
+
+```
+
+A estratégia de identificação utiliza a composição do sexo dos dois primeiros filhos (SameSex) como variável instrumental para o tamanho da família, fundamentada na literatura de Angrist e Evans (1998). Na amostra desta reprodução, a proporção de famílias cujos dois primeiros filhos são do mesmo sexo foi de 38% (frente a 43% no artigo). No Primeiro Estágio, o coeficiente estimado para SameSex foi de +0,297 (p < 0,05), confirmando a relação positiva teórica de que casais com dois primeiros filhos do mesmo sexo possuem maior probabilidade de ter dependentes adicionais. No artigo oficial, o coeficiente do primeiro estágio é de +0,847 (p < 0,01). 
+
+
+```{r}
+# --- 3. Filtros e Contagem de Filhos ---
+
+mw_analysis <- mw_analysis %>%
+  # drop if BH3==.
+  filter(!is.na(BH3)) %>%
+  # drop if MSTATUS==3 | drop if MSTATUS==9
+  filter(!MSTATUS %in% c(3, 9)) %>%
+  # drop if BH6 > 17  (mantém só filhos com <=17 anos, "dependentes")
+  filter(BH6 <= 17) %>%
+  # g criança=1 / bysort id_pess: egen crianca_dom = total(criança) / drop if crianca_dom==1
+  group_by(id_pess) %>%
+  mutate(crianca_dom = n()) %>%
+  ungroup() %>%
+  filter(crianca_dom != 1)
+
+```
+
+A intuição para a escolha deste instrumento é respaldada pela literatura de Angrist e Evans (1998), que baseia-se na preferência dos pais por uma composição mista do sexo dos filhos, e, consequentemente, faz com que casais cujos dois primeiros filhos são do mesmo sexo apresentem maior probabilidade de ter filhos adicionais. Na Samoa, esse impacto comportamental é expressivo: 75% dos pais com os dois primeiros filhos do mesmo sexo tiveram mais de dois filhos, enquanto apenas 50% daqueles com um casal tiveram mais dependentes. Como o sexo das crianças é determinado de forma aleatória, o instrumento atende ao critério de exogeneidade do instrumento, além de não apresentar correlação evidente com a incidência de violência doméstica.
+
+
+```{r}
+# --- 4. Variável Instrumental ---
+
+mw_analysis <- mw_analysis %>%
+  mutate(
+    meninas = if_else((BHLN == 1 & BH3 == 2) | (BHLN == 2 & BH3 == 2), 1, NA_real_),
+    meninos = if_else((BHLN == 1 & BH3 == 1) | (BHLN == 2 & BH3 == 1), 1, NA_real_)
+  ) %>%
+  group_by(id_pess) %>%
+  mutate(
+    duas_meninas_sum = sum(meninas, na.rm = TRUE),
+    dois_meninos_sum = sum(meninos, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    duas_meninas = if_else(duas_meninas_sum == 2, 1, 0),
+    dois_meninos = if_else(dois_meninos_sum == 2, 1, 0),
+    mesmo_genero = if_else(dois_meninos == 1 | duas_meninas == 1, 1, 0),
+    SameSex      = mesmo_genero,
+    DoisMeninos  = dois_meninos,
+    DuasMeninas  = duas_meninas
+  )
+```
+
+O mapeamento da violência doméstica é feito de acordo com o Anexo 1 do artigo:
+```{r}
+# --- 5. Mapeamento de Violência Doméstica  ---
+
+mw_analysis <- mw_analysis %>%
+  mutate(
+    v_emocional = case_when(
+      DVD4A == 1 | DVD4B == 1 | DVD4C == 1 ~ 1,
+      DVD4A == 2 & DVD4B == 2 & DVD4C == 2 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    v_fisica = case_when(
+      DVD5A == 1 | DVD5B == 1 | DVD5C == 1 | DVD5D == 1 | 
+        DVD5E == 1 | DVD5F == 1 | DVD5G == 1 ~ 1,
+      DVD5A == 2 & DVD5B == 2 & DVD5C == 2 & DVD5D == 2 & 
+        DVD5E == 2 & DVD5F == 2 & DVD5G == 2 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    v_sexual = case_when(
+      DVD5H == 1 | DVD5I == 1 | DVD5J == 1 ~ 1,
+      DVD5H == 2 & DVD5I == 2 & DVD5J == 2 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    IPV = case_when(
+      v_emocional == 1 | v_fisica == 1 | v_sexual == 1 ~ 1,
+      v_emocional == 0 & v_fisica == 0 & v_sexual == 0 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    # Compatibilidade com o nome usado nas suas fórmulas
+    ipv_lifetime = IPV
+  )
+
+```
+
+
+```{r}
+# --- 6. Renomeação, Ajuste de Variáveis e Filtros ---
+
+mw_analysis <- mw_analysis %>%
+  rename(
+    n_crianca_sub_5     = HH51,
+    n_crianca_5_17      = HH52,
+    idade_mais_novo     = BH6_last,
+    idade_mais_velho    = BH6_first,
+    idade_mae           = WB4,
+    idade_casar         = WAGEM,
+    ano_primeiro_parto  = BH4Y_first,
+    n_educacional       = welevel,
+    etnia               = WB22,
+    regiao              = HH7,
+    religiao            = WB20,
+    quintil             = windex5
+  ) %>%
+  mutate(
+    is_urban               = if_else(HH6 == 1, 1, 0),
+    n_crianca_sub_17       = n_crianca_sub_5 + n_crianca_5_17,
+    tam_fam                = n_crianca_sub_17,
+    # Variáveis mapeadas para os modelos econométricos
+    num_children_dep       = tam_fam,
+    mother_age             = as.numeric(idade_mae),
+    mother_age_first_birth = if_else(!is.na(idade_mais_velho), mother_age - as.numeric(idade_mais_velho), NA_real_),
+    mother_age_marriage    = if_else(as.numeric(idade_casar) %in% c(98, 99) | is.na(idade_casar), as.numeric(MA11), as.numeric(idade_casar)),
+    mother_age_marriage    = if_else(mother_age_marriage %in% c(98, 99), NA_real_, mother_age_marriage),
+    education_level        = as_factor(n_educacional),
+    wealth_quintile        = as_factor(quintil),
+    region_fe              = as_factor(regiao),
+    ethnicity              = as_factor(if_else(as.numeric(etnia) %in% c(9, 99), NA_real_, as.numeric(etnia))),
+    religion               = as_factor(if_else(as.numeric(religiao) %in% c(9, 99), NA_real_, as.numeric(religiao)))
+  ) %>%
+  # drop if quintil==0
+  filter(quintil != 0) %>%
+  # by id_pess, sort: g nvals= _n==1 -> keep if nvals==1 (deduplicação final por mulher)
+  group_by(id_pess) %>%
+  slice(1) %>%
+  ungroup() %>%
+  # drop if IPV==.
+  filter(!is.na(ipv_lifetime))
+
+```
+
+# --- 7. Modelagem Econométrica ---
+```{r}
+
+# 7.1 OLS Completo
+ols_spec2 <- lm_robust(
+  ipv_lifetime ~ num_children_dep + mother_age + mother_age_marriage + 
+    mother_age_first_birth + education_level + is_urban + wealth_quintile + 
+    ethnicity + religion,
+  fixed_effects = ~ region_fe,
+  clusters = HH1,
+  data = mw_analysis
+)
+
+# 7.2 Forma reduzida (ITT)
+rf_spec2 <- lm_robust(
+  ipv_lifetime ~ SameSex + mother_age + mother_age_marriage + 
+    mother_age_first_birth + education_level + is_urban + wealth_quintile + 
+    ethnicity + religion,
+  fixed_effects = ~ region_fe,
+  clusters = HH1,
+  data = mw_analysis
+)
+
+# 7.3 Primeiro estágio
+fs_spec2 <- lm_robust(
+  num_children_dep ~ SameSex + mother_age + mother_age_marriage + 
+    mother_age_first_birth + education_level + is_urban + wealth_quintile + 
+    ethnicity + religion,
+  fixed_effects = ~ region_fe,
+  clusters = HH1,
+  data = mw_analysis
+)
+
+# 7.4 VI-2SLS
+iv_spec2 <- iv_robust(
+  ipv_lifetime ~ num_children_dep + mother_age + mother_age_marriage + 
+    mother_age_first_birth + education_level + is_urban + wealth_quintile + 
+    ethnicity + religion | 
+    SameSex + mother_age + mother_age_marriage + 
+    mother_age_first_birth + education_level + is_urban + wealth_quintile + 
+    ethnicity + religion,
+  fixed_effects = ~ region_fe,
+  clusters = HH1,
+  data = mw_analysis
+)
+
+```
+A comparação entre as estimativas ilustra os desafios de identificação causal discutidos na literatura econométrica: 
+
+1) OLS (Mínimos Quadrados Ordinários): O coeficiente OLS estimado nesta reprodução é de -0,003 (DP: 0,007; sem significância estatística), alinhando-se ao OLS do artigo (+0,003, DP: 0,008). Isso confirma que o OLS sofre com viés de atenuação e variáveis omitidas (como preferências não observadas do casal e normas culturais), mascarando a real relação entre fertilidade e violência. 
+
+2) Forma Reduzida / ITT (Intent-to-Treat): A regressão do instrumento direto sobre a violência resultou em um coeficiente de +0,027 (DP: 0,033). No artigo original, a Forma Reduzida registra +0,056 (p &lt; 0,05), demonstrando que o choque exógeno na fertilidade aumenta a probabilidade de violência doméstica. 
+
+3) Segundo Estágio (IV-2SLS / LATE): A estimativa final de MQ2E resultou em um ponto estimado de +0,107 (Desvio padrão: 0,122). O artigo original encontra um efeito causal de +0,066 (p < 0,05), indicando que cada dependente adicional aumenta o risco de violência doméstica em 6,6 pontos percentuais. Embora a reprodução tenha capturado o sentido positivo do impacto causal, o erro-padrão elevado reduziu a significância estatística da estimação em segundo estágio.
+```{r, include=FALSE}
+# ============================================================
+# 8. TABELA DE RESULTADOS — OLS, RF, 1º ESTÁGIO E 2SLS
+# ============================================================
+
+# Função para extrair os resultados
+extrair_resultado <- function(modelo, variavel) {
+  
+  data.frame(
+    Estimate = modelo$coefficients[variavel],
+    Std_Error = modelo$std.error[variavel],
+    p_value = modelo$p.value[variavel]
+  )
+}
+
+# ------------------------------------------------------------
+# Extrair os coeficientes de interesse
+# ------------------------------------------------------------
+
+ols <- extrair_resultado(
+  ols_spec2,
+  "num_children_dep"
+)
+
+rf <- extrair_resultado(
+  rf_spec2,
+  "SameSex"
+)
+
+fs <- extrair_resultado(
+  fs_spec2,
+  "SameSex"
+)
+
+iv <- extrair_resultado(
+  iv_spec2,
+  "num_children_dep"
+)
+
+# ------------------------------------------------------------
+# Função para colocar estrelas de significância
+# ------------------------------------------------------------
+
+estrelas <- function(p) {
+  
+  ifelse(
+    p < 0.01, "***",
+    ifelse(
+      p < 0.05, "**",
+      ifelse(
+        p < 0.10, "*",
+        ""
+      )
+    )
+  )
+}
+
+# ------------------------------------------------------------
+# Tabela de coeficientes
+# ------------------------------------------------------------
+
+tabela_coef <- data.frame(
+  
+  Variables = c(
+    "Number of dependent children",
+    "Same-sex instrument"
+  ),
+  
+  OLS = c(
+    paste0(
+      sprintf("%.3f", ols$Estimate),
+      estrelas(ols$p_value)
+    ),
+    ""
+  ),
+  
+  `Reduced Form` = c(
+    "",
+    paste0(
+      sprintf("%.3f", rf$Estimate),
+      estrelas(rf$p_value)
+    )
+  ),
+  
+  `First Stage` = c(
+    "",
+    paste0(
+      sprintf("%.3f", fs$Estimate),
+      estrelas(fs$p_value)
+    )
+  ),
+  
+  `IV / 2SLS` = c(
+    paste0(
+      sprintf("%.3f", iv$Estimate),
+      estrelas(iv$p_value)
+    ),
+    ""
+  )
+)
+
+# ------------------------------------------------------------
+# Tabela de erros-padrão
+# ------------------------------------------------------------
+
+tabela_se <- data.frame(
+  
+  Variables = c(
+    "",
+    ""
+  ),
+  
+  OLS = c(
+    paste0(
+      "(",
+      sprintf("%.3f", ols$Std_Error),
+      ")"
+    ),
+    ""
+  ),
+  
+  `Reduced Form` = c(
+    "",
+    paste0(
+      "(",
+      sprintf("%.3f", rf$Std_Error),
+      ")"
+    )
+  ),
+  
+  `First Stage` = c(
+    "",
+    paste0(
+      "(",
+      sprintf("%.3f", fs$Std_Error),
+      ")"
+    )
+  ),
+  
+  `IV / 2SLS` = c(
+    paste0(
+      "(",
+      sprintf("%.3f", iv$Std_Error),
+      ")"
+    ),
+    ""
+  )
+)
+
+# ------------------------------------------------------------
+# Intercalar coeficientes e erros-padrão
+# ------------------------------------------------------------
+
+tabela_final <- data.frame(
+  Variables = character(),
+  OLS = character(),
+  `Reduced Form` = character(),
+  `First Stage` = character(),
+  `IV / 2SLS` = character()
+)
+
+for (i in 1:nrow(tabela_coef)) {
+  
+  tabela_final <- rbind(
+    tabela_final,
+    tabela_coef[i, ],
+    tabela_se[i, ]
+  )
+}
+
+```
+
+```{r}
+# ------------------------------------------------------------
+# Exibir tabela
+# ------------------------------------------------------------
+
+knitr::kable(
+  tabela_final,
+  format = "markdown",
+  col.names = c(
+    "Variables",
+    "OLS",
+    "Reduced Form",
+    "First Stage",
+    "IV / 2SLS"
+  ),
+  align = c("l", "r", "r", "r", "r")
+)
+
+# ------------------------------------------------------------
+# Informações adicionais da estimação
+# ------------------------------------------------------------
+
+cat("\n")
+cat("Observations (OLS):", nobs(ols_spec2), "\n")
+cat("Observations (Reduced Form):", nobs(rf_spec2), "\n")
+cat("Observations (First Stage):", nobs(fs_spec2), "\n")
+cat("Observations (IV / 2SLS):", nobs(iv_spec2), "\n")
+cat("\n")
+cat("Region fixed effects: Yes\n")
+cat("Standard errors clustered at household level\n")
+cat("Significance: *** p<0.01, ** p<0.05, * p<0.10\n")
+
+```
+
+
+```{r}
+# 1. OLS Completo 
+
+summary(ols_spec2) 
+
+# 2\. Forma Reduzida (ITT) 
+
+summary(rf_spec2) 
+
+# 3\. Primeiro Estágio (First Stage) 
+
+summary(fs_spec2) 
+
+# 4\. Segundo Estágio (MQ2E / IV-2SLS) 
+
+summary(iv_spec2)
+
+```
+
+
+```{r, include=FALSE}
+# Função para calcular estatísticas de uma variável numérica
+desc_num <- function(data, var, descricao) {
+  
+  x <- data[[var]]
+  
+  data.frame(
+    Variables = var,
+    N = sum(!is.na(x)),
+    Mean = mean(x, na.rm = TRUE),
+    SD = sd(x, na.rm = TRUE),
+    Min. = min(x, na.rm = TRUE),
+    Max. = max(x, na.rm = TRUE),
+    Description = descricao
+  )
+}
+
+# ------------------------------------------------------------
+# Variáveis numéricas
+# ------------------------------------------------------------
+
+tabela_num <- bind_rows(
+  
+  desc_num(
+    mw_analysis,
+    "num_children_dep",
+    "Number of dependent children under 18"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "mother_age",
+    "Mother's age"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "mother_age_marriage",
+    "Mother's age at marriage"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "mother_age_first_birth",
+    "Mother's age at first birth"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "is_urban",
+    "Urban residence (1 = urban)"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "SameSex",
+    "First two children are of the same sex"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "DoisMeninos",
+    "First two children are both boys"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "DuasMeninas",
+    "First two children are both girls"
+  ),
+  
+  desc_num(
+    mw_analysis,
+    "ipv_lifetime",
+    "Ever experienced intimate partner violence"
+  )
+)
+
+# ------------------------------------------------------------
+# Variáveis categóricas
+
+# Para variáveis categóricas, mostramos a distribuição da categoria na coluna Description e deixamos as estatísticas numéricas em branco.
+
+desc_cat <- function(data, var, descricao) {
+  
+  x <- data[[var]]
+  
+  tab <- table(x, useNA = "no")
+  
+  data.frame(
+    Variables = var,
+    N = sum(tab),
+    Mean = NA,
+    SD = NA,
+    Min. = NA,
+    Max. = NA,
+    Description = paste0(
+      descricao,
+      ": ",
+      paste(
+        names(tab),
+        as.numeric(tab),
+        sep = " = ",
+        collapse = "; "
+      )
+    )
+  )
+}
+
+tabela_cat <- bind_rows(
+  
+  desc_cat(
+    mw_analysis,
+    "education_level",
+    "Education level"
+  ),
+  
+  desc_cat(
+    mw_analysis,
+    "wealth_quintile",
+    "Household wealth index quintile"
+  ),
+  
+  desc_cat(
+    mw_analysis,
+    "ethnicity",
+    "Ethnicity"
+  ),
+  
+  desc_cat(
+    mw_analysis,
+    "religion",
+    "Religion"
+  ),
+  
+  desc_cat(
+    mw_analysis,
+    "region_fe",
+    "Region"
+  )
+)
+
+# ------------------------------------------------------------
+# Juntar as tabelas
+# ------------------------------------------------------------
+
+table1 <- bind_rows(
+  tabela_num,
+  tabela_cat
+)
+
+# ------------------------------------------------------------
+# Formatação
+# ------------------------------------------------------------
+
+table1 <- table1 %>%
+  mutate(
+    N = as.character(N),
+    Mean = ifelse(
+      is.na(Mean), 
+      "", 
+      sprintf("%.2f", Mean)
+    ),
+    SD = ifelse(
+      is.na(SD), 
+      "", 
+      sprintf("%.2f", SD)
+    ),
+    Min. = ifelse(
+      is.na(Min.), 
+      "", 
+      sprintf("%.2f", Min.)
+    ),
+    Max. = ifelse(
+      is.na(Max.), 
+      "", 
+      sprintf("%.2f", Max.)
+    )
+  )
+
+```
+
+A amostra analítica obtida nesta reprodução é composta por 1.152 observações, valor bastante próximo das 1.268 observações analisadas por Pritadrajati (2025). Quanto às características sociodemográficas da mãe, os dados estão significativamente alinhados com o artigo original: a idade média da mãe é de 35,41 anos nesta reprodução (frente a 36,23 no artigo) e a prevalência de violência doméstica ao longo da vida (\`ipv\_lifetime\`) é de 40% (frente a 41% no artigo). A principal divergência amostral ocorre na variável endógena de filhos dependentes (\`num\_children\_dep\`), que nesta reprodução apresentou média de 4,03 (com variação de 0 a 19 crianças no domicílio), enquanto o artigo registra média de 3,46 (com variação estrita de 2 a 10).
+
+```{r}
+knitr::kable(
+  table1,
+  format = "markdown",
+  col.names = c(
+    "Variables",
+    "N",
+    "Mean",
+    "SD",
+    "Min.",
+    "Max.",
+    "Description"
+  ),
+  align = c(
+    "l", "r", "r", "r", "r", "r", "l"
+  )
+)
+```
+
